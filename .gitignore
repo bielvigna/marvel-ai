@@ -1,0 +1,15 @@
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.db
+*.sqlite3
+firebase-service-account.json
+google-services.json
+firebase-adminsdk*.json
+service-account*.json
+.coverage
