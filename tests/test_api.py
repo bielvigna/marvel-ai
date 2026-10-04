@@ -62,6 +62,32 @@ def test_chat_language_contract_and_response_shape(monkeypatch):
     assert languages == ["pt-BR", "en"]
 
 
+def test_chat_logs_provider_failure_without_logging_user_message(monkeypatch):
+    from app import main
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    class FakeAgent:
+        async def ainvoke(self, payload):
+            raise RuntimeError("provider rejected model request")
+
+    logs = []
+    monkeypatch.setattr(main, "comic_vine_client", FakeClient)
+    monkeypatch.setattr(main, "create_marvel_agent", lambda *args: FakeAgent())
+    monkeypatch.setattr(main.logger, "warning", lambda *args: logs.append(args))
+
+    prompt = "PRIVATE_PROMPT_MUST_NOT_BE_LOGGED"
+    response = TestClient(app).post("/api/chat", json={"message": prompt})
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "ai_request_failed"
+    assert len(logs) == 1
+    assert "RuntimeError" in str(logs[0])
+    assert prompt not in str(logs[0])
+
+
 def test_chat_restores_and_saves_recent_history_for_the_same_conversation(monkeypatch):
     from app import main
 

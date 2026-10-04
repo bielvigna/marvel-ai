@@ -153,6 +153,7 @@ async def chat(request: ChatRequest, http_request: Request):
                 logger.warning("Mongo chat memory write failed; returning the answer without persistence.")
         return ChatResponse(answer=str(answer), sources=sources)
     except Exception as exc:
+        logger.warning("AI chat request failed (%s): %s", type(exc).__name__, str(exc)[:500])
         raise HTTPException(status_code=502, detail={"code": "ai_request_failed", "message": "The AI could not complete the request."}) from exc
     finally:
         client.close()
