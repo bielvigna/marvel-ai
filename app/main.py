@@ -69,10 +69,11 @@ def health():
 
 
 @app.get("/api/characters", response_model=CharacterPage)
-def characters(q: str = Query(default="", max_length=120), limit: int = Query(default=20, ge=1, le=50), offset: int = Query(default=0, ge=0)):
+def characters(q: str = Query(default="", max_length=120), limit: int = Query(default=20, ge=1, le=50),
+               offset: int = Query(default=0, ge=0), include_relations: bool = False):
     client = comic_vine_client()
     try:
-        return client.search_characters(q.strip(), limit, offset)
+        return client.search_characters(q.strip(), limit, offset, include_relations=include_relations)
     except ComicVineError as exc:
         raise error_response(exc) from exc
     finally:

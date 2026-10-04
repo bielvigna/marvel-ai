@@ -59,3 +59,81 @@ def test_rate_limit_and_timeout_have_typed_errors():
     with pytest.raises(ComicVineError) as timeout_error:
         timed_out.search_characters()
     assert timeout_error.value.code == "comic_vine_timeout"
+
+
+def test_character_detail_uses_comic_vine_character_key():
+    def handler(request):
+        assert request.url.path.endswith("/character/4005-77/")
+        return httpx.Response(200, json={"status_code": 1, "results": {
+            "id": 77, "name": "Hero", "powers": [{"id": 1, "name": "Flight"}],
+            "teams": [{"id": 2, "name": "Avengers"}],
+        }})
+
+    client = ComicVineClient("secret", httpx.Client(transport=httpx.MockTransport(handler)))
+    character = client.get_character(77)
+    assert character["powers"] == [{"id": 1, "name": "Flight", "api_detail_url": None}]
+    assert character["teams"] == [{"id": 2, "name": "Avengers", "api_detail_url": None}]
+
+
+def test_relationship_enrichment_is_opt_in_for_paged_search():
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/characters/"):
+            return httpx.Response(200, json={"status_code": 1, "number_of_total_results": 1,
+                "results": [{"id": 77, "name": "Hero", "powers": [], "teams": []}]})
+        return httpx.Response(200, json={"status_code": 1, "results": {
+            "id": 77, "name": "Hero", "powers": [{"id": 1, "name": "Flight"}],
+            "teams": [{"id": 2, "name": "Avengers"}],
+        }})
+
+    client = ComicVineClient("secret", httpx.Client(transport=httpx.MockTransport(handler)))
+    page = client.search_characters(limit=1, include_relations=True)
+    assert len(paths) == 2
+    assert page["results"][0]["powers"][0]["name"] == "Flight"
+    assert page["results"][0]["teams"][0]["name"] == "Avengers"
+    assert page["relations_complete"] is True
+
+
+def test_relationship_enrichment_never_exceeds_five_cache_misses_per_page():
+    detail_calls = []
+
+    def handler(request):
+        if request.url.path.endswith("/characters/"):
+            assert request.url.params["limit"] == "5"
+            return httpx.Response(200, json={"status_code": 1, "number_of_total_results": 100,
+                "results": [{"id": 9000 + index, "name": f"Hero {index}"} for index in range(5)]})
+        detail_calls.append(request.url.path)
+        character_id = int(request.url.path.rsplit("-", 1)[1].strip("/"))
+        return httpx.Response(200, json={"status_code": 1, "results": {
+            "id": character_id, "name": f"Hero {character_id}", "powers": [{"id": 1, "name": "Flight"}],
+        }})
+
+    client = ComicVineClient("bounded-test-key", httpx.Client(transport=httpx.MockTransport(handler)))
+    page = client.search_characters(limit=8, offset=10, include_relations=True)
+    assert len(page["results"]) == 5
+    assert len(detail_calls) == 5
+    assert page["relations_complete"] is True
+    assert page["offset"] == 10
+    assert page["next_offset"] == 15
+    assert page["has_more"] is True
+
+
+def test_relationship_enrichment_reuses_cached_details():
+    detail_calls = []
+
+    def handler(request):
+        if request.url.path.endswith("/characters/"):
+            return httpx.Response(200, json={"status_code": 1, "number_of_total_results": 1,
+                "results": [{"id": 987654, "name": "Cached Hero"}]})
+        detail_calls.append(request.url.path)
+        return httpx.Response(200, json={"status_code": 1, "results": {
+            "id": 987654, "name": "Cached Hero", "teams": [{"id": 2, "name": "Avengers"}],
+        }})
+
+    client = ComicVineClient("cache-test-key", httpx.Client(transport=httpx.MockTransport(handler)))
+    first = client.search_characters(limit=1, include_relations=True)
+    second = client.search_characters(limit=1, include_relations=True)
+    assert len(detail_calls) == 1
+    assert first["results"][0]["teams"] == second["results"][0]["teams"]

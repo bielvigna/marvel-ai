@@ -32,6 +32,8 @@ class CharacterPage(BaseModel):
     limit: int
     total: int
     has_more: bool
+    relations_complete: bool = True
+    next_offset: int | None = None
 
 
 class ChatMessage(BaseModel):

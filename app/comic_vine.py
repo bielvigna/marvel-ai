@@ -1,4 +1,8 @@
+import hashlib
 import json
+import threading
+import time
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import quote
 
@@ -9,6 +13,13 @@ BASE_URL = "https://comicvine.gamespot.com/api/"
 CHARACTER_FIELDS = "id,name,real_name,deck,description,image,publisher,origin,powers,teams,first_appeared_in_issue,count_of_issue_appearances,api_detail_url"
 LIST_FIELDS = "id,name,real_name,deck,image,publisher,origin,powers,teams,first_appeared_in_issue,count_of_issue_appearances,api_detail_url"
 ALLOWED_RESOURCES = {"characters", "character", "teams", "team", "issues", "issue", "story_arcs", "story_arc", "powers", "power", "movies", "movie", "locations", "location", "publishers", "publisher"}
+MAX_RELATION_LOOKUPS_PER_PAGE = 5
+RELATION_CACHE_TTL_SECONDS = 6 * 60 * 60
+RELATION_CACHE_MAX_ITEMS = 2048
+MAX_CONCURRENT_RELATION_LOOKUPS = 2
+_relation_cache: OrderedDict[tuple[str, int], tuple[float, dict[str, Any]]] = OrderedDict()
+_relation_cache_lock = threading.Lock()
+_relation_lookup_slots = threading.BoundedSemaphore(MAX_CONCURRENT_RELATION_LOOKUPS)
 
 
 class ComicVineError(Exception):
@@ -74,7 +85,10 @@ class ComicVineClient:
             raise ComicVineError("comic_vine_not_configured", "Configure COMIC_VINE_API_KEY no arquivo .env do backend.", 503)
         limit = min(max(limit, 1), 50)
         offset = max(offset, 0)
-        path = f"{resource}/{resource_id}/" if resource_id is not None else f"{resource}/"
+        # Comic Vine's character detail endpoint requires the resource key (4005-<id>),
+        # while list responses expose only the numeric id.
+        detail_key = f"4005-{resource_id}" if resource == "character" and resource_id is not None else resource_id
+        path = f"{resource}/{detail_key}/" if detail_key is not None else f"{resource}/"
         params: dict[str, Any] = {"api_key": self.api_key, "format": "json", "field_list": fields}
         if resource_id is None:
             params.update(limit=limit, offset=offset)
@@ -102,15 +116,50 @@ class ComicVineClient:
             raise ComicVineError(code, message, status)
         return payload
 
-    def search_characters(self, query: str = "", limit: int = 20, offset: int = 0) -> dict[str, Any]:
-        payload = self._get("characters", filter_value=f"name:{query}" if query else None,
-                            fields=LIST_FIELDS, limit=limit, offset=offset)
-        results = [mapped for raw in payload.get("results", []) if (mapped := map_character(raw))]
-        total = int(payload.get("number_of_total_results", len(results)) or 0)
+    def search_characters(self, query: str = "", limit: int = 20, offset: int = 0,
+                          include_relations: bool = False) -> dict[str, Any]:
         safe_limit = min(max(limit, 1), 50)
+        if include_relations:
+            safe_limit = min(safe_limit, MAX_RELATION_LOOKUPS_PER_PAGE)
+        payload = self._get("characters", filter_value=f"name:{query}" if query else None,
+                            fields=LIST_FIELDS, limit=safe_limit, offset=offset)
+        results = [mapped for raw in payload.get("results", []) if (mapped := map_character(raw))]
+        relation_complete = True
+        if include_relations:
+            for index, character in enumerate(results):
+                details = self._cached_character_details(character["id"])
+                if details is not None:
+                    results[index] = details
+                else:
+                    relation_complete = False
+        total = int(payload.get("number_of_total_results", len(results)) or 0)
         safe_offset = max(offset, 0)
+        next_offset = safe_offset + len(results)
         return {"results": results, "offset": safe_offset, "limit": safe_limit, "total": total,
-                "has_more": safe_offset + len(results) < total}
+                "has_more": next_offset < total, "relations_complete": relation_complete,
+                "next_offset": next_offset}
+
+    def _cached_character_details(self, character_id: int) -> dict[str, Any] | None:
+        cache_key = (hashlib.sha256(self.api_key.encode("utf-8")).hexdigest(), character_id)
+        now = time.monotonic()
+        with _relation_cache_lock:
+            cached = _relation_cache.get(cache_key)
+            if cached is not None and now - cached[0] < RELATION_CACHE_TTL_SECONDS:
+                _relation_cache.move_to_end(cache_key)
+                return cached[1]
+            if cached is not None:
+                del _relation_cache[cache_key]
+        try:
+            with _relation_lookup_slots:
+                details = self.get_character(character_id)
+        except ComicVineError:
+            return None
+        with _relation_cache_lock:
+            _relation_cache[cache_key] = (now, details)
+            _relation_cache.move_to_end(cache_key)
+            while len(_relation_cache) > RELATION_CACHE_MAX_ITEMS:
+                _relation_cache.popitem(last=False)
+        return details
 
     def get_character(self, character_id: int) -> dict[str, Any]:
         payload = self._get("character", resource_id=character_id, fields=CHARACTER_FIELDS)

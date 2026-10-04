@@ -18,15 +18,21 @@ LANGUAGE_INSTRUCTIONS = {
     "en": "Respond in English.",
 }
 
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
 
 def create_marvel_agent(settings: Settings, comic_vine: ComicVineClient, spoiler_level: str, language: str = "pt-BR"):
     if not settings.ai_api_key or not settings.ai_model:
         raise RuntimeError("AI_NOT_CONFIGURED")
-    if settings.ai_provider.lower() not in {"openai", "openai-compatible"}:
+    provider = settings.ai_provider.strip().lower()
+    if provider not in {"openai", "openai-compatible", "groq"}:
         raise RuntimeError("UNSUPPORTED_AI_PROVIDER")
     model_options = {"model": settings.ai_model, "api_key": settings.ai_api_key, "temperature": 0.2}
-    if settings.ai_base_url:
-        model_options["base_url"] = settings.ai_base_url
+    base_url = settings.ai_base_url.strip()
+    if base_url:
+        model_options["base_url"] = base_url
+    elif provider == "groq":
+        model_options["base_url"] = GROQ_BASE_URL
     model = ChatOpenAI(**model_options)
     return create_agent(
         model=model,
